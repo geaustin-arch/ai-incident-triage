@@ -1,0 +1,3 @@
+name: AI Incident Triage Copilot
+summary: Evidence-grounded production incident analysis with Gemini on Vertex AI and a deterministic fallback.
+level: intermediate-to-advanced
