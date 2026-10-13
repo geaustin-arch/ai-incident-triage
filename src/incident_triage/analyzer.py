@@ -59,7 +59,7 @@ def _prompt(request: IncidentRequest, lines: dict[str, str], service: str, summa
 
 def _heuristic(request: IncidentRequest, lines: dict[str, str]) -> IncidentAssessment:
     joined = "\n".join(lines.values()).lower()
-    if any(term in joined for term in ("connection refused", "too many connections", "database timeout", "sqlstate")):
+    if any(term in joined for term in ("connection refused", "too many connections", "database timeout", "db connection", "sqlstate")):
         cause, terms = "The service appears unable to establish or maintain database connections.", ("connection", "database", "sqlstate")
         actions = ["Check database health and connection-pool saturation.", "Compare recent database and application deployment changes."]
     elif any(term in joined for term in ("timeout", "timed out", "upstream")):
