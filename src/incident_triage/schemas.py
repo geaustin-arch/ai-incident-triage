@@ -11,6 +11,14 @@ class IncidentRequest(BaseModel):
     summary: str = Field(min_length=8, max_length=1500)
     log_lines: list[str] = Field(min_length=1, max_length=60)
 
+    @field_validator("incident_id", "service", "summary")
+    @classmethod
+    def strip_required_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("value must not be blank")
+        return value
+
     @field_validator("log_lines")
     @classmethod
     def bound_log_lines(cls, lines: list[str]) -> list[str]:
@@ -20,7 +28,7 @@ class IncidentRequest(BaseModel):
 
 
 class Evidence(BaseModel):
-    line_id: str
+    line_id: str = Field(pattern=r"^log-\d{2}$")
     quote: str = Field(min_length=1, max_length=500)
 
 
@@ -35,6 +43,6 @@ class IncidentAssessment(BaseModel):
 
 class IncidentResponse(BaseModel):
     incident_id: str
-    analysis_mode: Literal["vertex_gemini", "deterministic_fallback"]
+    analysis_mode: Literal["google_cloud_gemini", "deterministic_fallback"]
     assessment: IncidentAssessment
     privacy_redactions: int

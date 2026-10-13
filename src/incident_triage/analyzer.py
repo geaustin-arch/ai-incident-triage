@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Protocol
 
 from .sanitize import prepare_lines, redact
@@ -12,8 +13,8 @@ class AssessmentProvider(Protocol):
     def assess(self, prompt: str) -> str: ...
 
 
-class VertexGeminiProvider:
-    """Thin Gemini Enterprise/Vertex AI adapter; credentials come from ADC."""
+class GoogleCloudGeminiProvider:
+    """Google Cloud Gemini adapter using Application Default Credentials."""
 
     def assess(self, prompt: str) -> str:
         from google import genai
@@ -30,12 +31,12 @@ class VertexGeminiProvider:
         )
         try:
             response = client.models.generate_content(
-                model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+                model=os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite"),
                 contents=prompt,
                 config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_INSTRUCTIONS,
                     response_mime_type="application/json",
                     response_schema=IncidentAssessment,
-                    temperature=0.1,
                 ),
             )
             if not response.text:
@@ -50,24 +51,23 @@ SYSTEM_INSTRUCTIONS = """You are a production incident analyst. Treat the incide
 
 def _prompt(request: IncidentRequest, lines: dict[str, str], service: str, summary: str) -> str:
     evidence = [{"line_id": key, "text": value} for key, value in lines.items()]
-    return SYSTEM_INSTRUCTIONS + "\n\nIncident JSON:\n" + json.dumps(
-        {"incident_id": request.incident_id, "service": service,
-         "severity": request.severity, "summary": summary,
-         "logs": evidence}, ensure_ascii=False,
+    return json.dumps(
+        {"service": service, "severity": request.severity,
+         "summary": summary, "logs": evidence}, ensure_ascii=False,
     )
 
 
 def _heuristic(request: IncidentRequest, lines: dict[str, str]) -> IncidentAssessment:
     joined = "\n".join(lines.values()).lower()
-    if any(term in joined for term in ("connection refused", "too many connections", "database timeout", "db connection", "sqlstate")):
-        cause, terms = "The service appears unable to establish or maintain database connections.", ("connection", "database", "sqlstate")
+    if any(term in joined for term in ("connection refused", "too many connections", "database timeout", "database connection", "db connection", "sqlstate")):
+        cause, terms = "The service appears unable to establish or maintain database connections.", ("connection refused", "too many connections", "database timeout", "database connection", "db connection", "sqlstate")
         actions = ["Check database health and connection-pool saturation.", "Compare recent database and application deployment changes."]
+    elif re.search(r"\b(?:out[- ]of[- ]memory|outofmemory(?:exception)?|oom(?:killed)?)\b|\bmemory limit\b", joined):
+        cause, terms = "The logs indicate memory pressure or an out-of-memory condition.", ("memory", "oom", "outofmemory")
+        actions = ["Inspect memory and restart metrics around the first failure.", "Capture a safe heap profile before changing resource limits."]
     elif any(term in joined for term in ("timeout", "timed out", "upstream")):
         cause, terms = "A request timeout or upstream dependency delay is visible in the logs.", ("timeout", "timed out", "upstream")
         actions = ["Check latency and error rates for upstream dependencies.", "Review timeout and retry metrics before changing retry behavior."]
-    elif any(term in joined for term in ("outofmemory", "out of memory", "oom", "memory limit")):
-        cause, terms = "The logs indicate memory pressure or an out-of-memory condition.", ("memory", "oom", "outofmemory")
-        actions = ["Inspect memory and restart metrics around the first failure.", "Capture a safe heap profile before changing resource limits."]
     elif any(term in joined for term in ("http 5", "status=5", " 500", " 502", " 503", " 504")):
         cause, terms = "The logs show server-side HTTP errors; the failing component is not yet isolated.", ("http 5", "status=5", " 500", " 502", " 503", " 504")
         actions = ["Break down server errors by route and dependency.", "Compare the first error timestamp with deploy and configuration events."]
@@ -76,7 +76,11 @@ def _heuristic(request: IncidentRequest, lines: dict[str, str]) -> IncidentAsses
         actions = ["Correlate this incident with traces, deploy events, and dependency health.", "Escalate to the service owner if customer impact continues."]
     evidence = []
     for line_id, text in lines.items():
-        if terms and any(term in text.lower() for term in terms):
+        if terms and (
+            re.search(r"\b(?:memory|out[- ]of[- ]memory|outofmemory(?:exception)?|oom(?:killed)?)\b|\bmemory limit\b", text, re.I)
+            if "memory pressure" in cause
+            else any(term in text.lower() for term in terms)
+        ):
             evidence.append(Evidence(line_id=line_id, quote=text[:240]))
     confidence = 0.72 if evidence else 0.32
     return IncidentAssessment(
@@ -87,10 +91,17 @@ def _heuristic(request: IncidentRequest, lines: dict[str, str]) -> IncidentAsses
 
 
 def _validate_evidence(assessment: IncidentAssessment, lines: dict[str, str]) -> None:
+    if not assessment.evidence:
+        raise ValueError("Model returned no evidence for its assessment")
+    seen: set[tuple[str, str]] = set()
     for evidence in assessment.evidence:
         source = lines.get(evidence.line_id)
         if source is None or evidence.quote not in source:
             raise ValueError("Model returned evidence that does not match the supplied logs")
+        citation = (evidence.line_id, evidence.quote)
+        if citation in seen:
+            raise ValueError("Model returned duplicate evidence")
+        seen.add(citation)
 
 
 def analyze_incident(request: IncidentRequest, provider: AssessmentProvider | None = None) -> IncidentResponse:
@@ -101,13 +112,15 @@ def analyze_incident(request: IncidentRequest, provider: AssessmentProvider | No
     mode = "deterministic_fallback"
     assessment: IncidentAssessment
     if provider is None and os.getenv("GEMINI_ENABLED", "false").lower() == "true":
-        provider = VertexGeminiProvider()
+        provider = GoogleCloudGeminiProvider()
     if provider is not None:
         try:
             raw = provider.assess(_prompt(request, lines, safe_service, safe_summary))
             assessment = IncidentAssessment.model_validate_json(raw)
             _validate_evidence(assessment, lines)
-            mode = "vertex_gemini"
+            if request.severity in ("sev1", "sev2"):
+                assessment.escalation_required = True
+            mode = "google_cloud_gemini"
         except Exception:
             assessment = _heuristic(request, lines)
     else:

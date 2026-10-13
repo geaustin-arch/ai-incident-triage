@@ -5,7 +5,11 @@ import re
 
 PATTERNS = (
     re.compile(r"(?i)(authorization\s*[:=]\s*bearer\s+)\S+"),
-    re.compile(r"(?i)(\b(?:api[_-]?key|access[_-]?token|password|secret)\s*[:=]\s*)[^\s,;]+"),
+    re.compile(r"(?i)((?:['\"]?\b(?:api[_-]?key|access[_-]?token|client[_-]?secret|password|secret)\b['\"]?)\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"),
+    re.compile(r"-----BEGIN(?: [A-Z]+)* PRIVATE KEY-----[\s\S]*?-----END(?: [A-Z]+)* PRIVATE KEY-----"),
+    re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"),
+    re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),
+    re.compile(r"\bAIza[0-9A-Za-z_-]{20,}\b"),
     re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I),
 )
 
@@ -13,7 +17,7 @@ PATTERNS = (
 def redact(text: str) -> tuple[str, int]:
     count = 0
     for index, pattern in enumerate(PATTERNS):
-        replacement = r"\1[REDACTED]" if index < 2 else "[EMAIL]"
+        replacement = r"\1[REDACTED]" if index < 2 else "[REDACTED]" if index < 7 else "[EMAIL]"
         text, hits = pattern.subn(replacement, text)
         count += hits
     return text, count
